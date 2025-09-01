@@ -48,8 +48,8 @@ This project is licensed under the MIT License – free to use, modify, and shar
 
 ## 🛠 Requirements
 Install dependencies with:  
-pip install -r requirements.txt
 
 ```bash
+pip install -r requirements.txt
 
 
