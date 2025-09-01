@@ -15,7 +15,11 @@ With built-in text cleaning and formatting, the app displays stories in a sleek 
 ---
 ## ▶️ Usage
 Run the application with:
+```bash
 python main.py
+
+```
+
 ---
 
 ## 📂 Project Structure
