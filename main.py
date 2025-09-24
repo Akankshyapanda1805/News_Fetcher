@@ -1,4 +1,5 @@
-import os 
+# main.py
+import os
 import tweepy
 import requests
 from dotenv import load_dotenv
@@ -8,8 +9,40 @@ from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import re
 
+# -------------------------
+# Load environment variables
+# -------------------------
 load_dotenv()
+HISTORY_FILE = "news_history.csv"
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
+NEWSAPI_ENDPOINT = "https://newsapi.org/v2/everything"
 
+# -------------------------
+# Slack function
+# -------------------------
+def send_slack_alert(message="🚨 Test alert from News Aggregator"):
+    if not SLACK_WEBHOOK_URL:
+        print("⚠️ Slack webhook not configured in .env")
+        return
+    try:
+        resp = requests.post(
+            SLACK_WEBHOOK_URL,
+            json={"text": message},
+            timeout=10
+        )
+        print("🔍 Slack response:", resp.status_code, resp.text)
+        if resp.status_code == 200:
+            print("✅ Slack alert sent successfully!")
+        else:
+            print(f"⚠️ Failed to send Slack alert: {resp.status_code}, {resp.text}")
+    except Exception as e:
+        print(f"⚠️ Slack exception: {e}")
+
+# -------------------------
+# Utility functions
+# -------------------------
 def clean_text(text):
     if not text:
         return "Unknown"
@@ -29,10 +62,51 @@ def format_datetime(date_str):
         except:
             return str(date_str)
 
-TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
+# -------------------------
+# History saving / dedupe
+# -------------------------
+def save_to_history(data, filename=HISTORY_FILE):
+    if not data:
+        return False
+    try:
+        df_new = pd.DataFrame(data)
+        expected_cols = ["Platform", "Time", "Author", "Title", "Description", "URL"]
+        for c in expected_cols:
+            if c not in df_new.columns:
+                df_new[c] = ""
+
+        if os.path.exists(filename):
+            df_new.to_csv(filename, mode="a", header=False, index=False, encoding="utf-8")
+        else:
+            df_new.to_csv(filename, index=False, encoding="utf-8")
+        dedupe_history(filename)
+        return True
+    except Exception as e:
+        print("Error saving history:", e)
+        return False
+
+def dedupe_history(filename=HISTORY_FILE):
+    try:
+        if not os.path.exists(filename):
+            return
+        df = pd.read_csv(filename, dtype=str)
+        for col in ["URL", "Title", "Description"]:
+            if col not in df.columns:
+                df[col] = ""
+        df["URL"] = df["URL"].fillna("").astype(str).str.strip()
+        df["Title"] = df["Title"].fillna("").astype(str).str.strip()
+        df["Description"] = df["Description"].fillna("").astype(str).str.strip()
+        if df["URL"].astype(bool).any():
+            df = df.drop_duplicates(subset=["URL"], keep="first")
+        df = df.drop_duplicates(subset=["Title", "Description"], keep="first")
+        df.to_csv(filename, index=False, encoding="utf-8")
+    except Exception as e:
+        print("Error deduping history:", e)
+
+# -------------------------
+# Twitter fetcher
+# -------------------------
 client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
-
-
 
 def fetch_twitter_news(query, count=10):
     try:
@@ -42,7 +116,7 @@ def fetch_twitter_news(query, count=10):
             tweet_fields=["created_at", "text", "author_id"]
         )
         results = []
-        if tweets.data:
+        if tweets and getattr(tweets, "data", None):
             for tweet in tweets.data:
                 tweet_time = format_datetime(str(tweet.created_at)) if tweet.created_at else "Unknown"
                 text_cleaned = clean_text(tweet.text)
@@ -59,21 +133,23 @@ def fetch_twitter_news(query, count=10):
         messagebox.showerror("Error", f"⚠️ Error fetching tweets: {e}")
         return []
 
-
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
-NEWSAPI_ENDPOINT = "https://newsapi.org/v2/everything"
-
-
-
+# -------------------------
+# Google News fetcher
+# -------------------------
 def fetch_google_news(query, count=40):
-    params = {"q": query, "apiKey": NEWSAPI_KEY, "language": "en", "pageSize": count}
-    response = requests.get(NEWSAPI_ENDPOINT, params=params)
-    data = response.json()
+    try:
+        params = {"q": query, "apiKey": NEWSAPI_KEY, "language": "en", "pageSize": count}
+        response = requests.get(NEWSAPI_ENDPOINT, params=params, timeout=15)
+        data = response.json()
+    except Exception as e:
+        messagebox.showerror("Error", f"⚠️ Error fetching Google News: {e}")
+        return []
+
     results = []
     if "articles" in data:
         for article in data["articles"]:
             pub_time = format_datetime(article.get("publishedAt", ""))
-            title_cleaned = clean_text(article["title"])
+            title_cleaned = clean_text(article.get("title", ""))
             desc_cleaned = clean_text(article.get("description", "No description"))
             results.append({
                 "Platform": "Google News",
@@ -81,12 +157,14 @@ def fetch_google_news(query, count=40):
                 "Author": article.get("author", "Unknown"),
                 "Title": title_cleaned,
                 "Description": desc_cleaned,
-                "URL": article["url"]
+                "URL": article.get("url", "")
             })
     return results
 
-
-
+# -------------------------
+# GUI logic
+# -------------------------
+latest_results = []
 
 def show_results():
     query = search_entry.get().strip()
@@ -100,7 +178,6 @@ def show_results():
 
     google_news = fetch_google_news(query, count=40)
     twitter_news = fetch_twitter_news(query, count=10)
-    
 
     for news in twitter_news:
         tree_twitter.insert("", "end", values=(news["Platform"], news["Time"], news["Author"],
@@ -110,7 +187,21 @@ def show_results():
                                               news["Title"], news["Description"], news["URL"]))
 
     global latest_results
-    latest_results = google_news + twitter_news 
+    latest_results = google_news + twitter_news
+
+    if latest_results:
+        success = save_to_history(latest_results, HISTORY_FILE)
+        if success:
+            count_google = len(google_news)
+            count_twitter = len(twitter_news)
+            total_count = len(latest_results)
+            status_label.config(text=f"✅ Saved {total_count} news items to history", fg="#00ffcc")
+            # Send Slack alert automatically
+            send_slack_alert(f"✅ {count_twitter} Twitter + {count_google} Google News items saved for keyword: {query}")
+        else:
+            status_label.config(text="⚠️ Error saving history", fg="red")
+    else:
+        status_label.config(text="⚠️ No results to save", fg="orange")
 
 def save_results():
     if not latest_results:
@@ -122,19 +213,20 @@ def save_results():
         pd.DataFrame(latest_results).to_csv(file_path, index=False, encoding="utf-8")
         messagebox.showinfo("Success", f"Results saved to {file_path}")
 
+def send_test_slack():
+    send_slack_alert("🔔 Test alert from GUI button!")
+    messagebox.showinfo("Slack Test", "Test Slack alert sent!")
 
-
-
+# -------------------------
+# Tkinter UI
+# -------------------------
 root = tk.Tk()
 root.title("⚡ News Aggregator - Twitter & Google News")
-root.geometry("1250x720")
+root.geometry("1250x750")
 root.configure(bg="#1a1a1a")
-
-
 
 style = ttk.Style()
 style.theme_use("clam")
-
 style.configure("Treeview",
                 background="#262626",
                 foreground="white",
@@ -142,13 +234,10 @@ style.configure("Treeview",
                 fieldbackground="#262626",
                 font=("Consolas", 10))
 style.map("Treeview", background=[("selected", "#00b894")])
-
 style.configure("Treeview.Heading",
                 background="#0f0f0f",
                 foreground="#00ffcc",
                 font=("Consolas", 11, "bold"))
-
-
 
 frame_top = tk.Frame(root, bg="#1a1a1a")
 frame_top.pack(fill="x", pady=15, padx=20)
@@ -177,12 +266,15 @@ btn_save.pack(side=tk.LEFT, padx=8)
 btn_save.bind("<Enter>", hover_btn)
 btn_save.bind("<Leave>", leave_btn)
 
+# Test Slack Button
+btn_test_slack = tk.Button(frame_top, text="Send Slack Test Alert", command=send_test_slack,
+                            font=("Consolas", 12, "bold"), bg="#0984e3", fg="white", relief="flat", padx=15, pady=5)
+btn_test_slack.pack(side=tk.LEFT, padx=8)
+btn_test_slack.bind("<Enter>", lambda e: e.widget.config(bg="#0984e3"))
+btn_test_slack.bind("<Leave>", lambda e: e.widget.config(bg="#0984e3"))
 
 notebook = ttk.Notebook(root)
 notebook.pack(fill="both", expand=True, padx=15, pady=15)
-
-
-
 
 frame_twitter = tk.Frame(notebook, bg="#1a1a1a")
 notebook.add(frame_twitter, text="🐦 Twitter News")
@@ -194,8 +286,6 @@ for col in columns:
     tree_twitter.column(col, width=180, anchor="center")
 tree_twitter.pack(fill="both", expand=True)
 
-
-
 frame_google = tk.Frame(notebook, bg="#1a1a1a")
 notebook.add(frame_google, text="🌍 Google News")
 
@@ -205,5 +295,9 @@ for col in columns:
     tree_google.column(col, width=180, anchor="center")
 tree_google.pack(fill="both", expand=True)
 
-latest_results = []
+# Status label at bottom
+status_label = tk.Label(root, text="Ready", font=("Consolas", 11),
+                        bg="#1a1a1a", fg="white", anchor="w")
+status_label.pack(fill="x", padx=15, pady=5)
+
 root.mainloop()
