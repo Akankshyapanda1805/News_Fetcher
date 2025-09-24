@@ -1,5 +1,21 @@
+# Twitter + News API
 tweepy
 requests
 python-dotenv
 pandas
 tk
+Pillow
+beautifulsoup4
+lxml
+
+# Forecasting
+prophet
+matplotlib    
+seaborn
+
+# Sentiment Analysis (optional if you re-enable later)
+nltk
+vaderSentiment
+
+# Slack integration
+slack-sdk
